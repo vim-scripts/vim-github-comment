@@ -33,26 +33,40 @@ function! GHComment(body)
   let repo = s:GitHubRepository()
   let commit_sha = s:CommitShaForCurrentLine()
   let path = s:GetRelativePathOfBufferInRepository()
-  let linenumber = line('.')
+  let diff_position = s:GetDiffLineNumber(commit_sha, path)
   let comment = a:body
   let save_view = winsaveview()
 
-  execute s:CommentOnGitHub(auth, repo, commit_sha, path, linenumber, comment)
+  let response = s:CommentOnGitHub(auth, repo, commit_sha, path, diff_position, comment)
+
+  if response.status == 201
+    let body = webapi#json#decode(response.content)
+    let html_url = body['html_url']
+    if get(g:, 'github_comment_open_browser', 0) == 1
+      call s:OpenBrowser(html_url)
+    endif
+
+    echomsg "Comment created: ".html_url
+  else
+    echohl ErrorMsg | echomsg "Could not create comment. You may not have the rights." | echohl None
+  endif
 
   call winrestview(save_view)
 endfunction
 
-function! s:CommentOnGitHub(auth, repo, commit_sha, path, linenumber, comment)
+function! s:CommentOnGitHub(auth, repo, commit_sha, path, diff_position, comment)
   let request_uri = 'https://api.github.com/repos/'.a:repo.'/commits/'.a:commit_sha.'/comments'
 
   let response = webapi#http#post(request_uri, webapi#json#encode({
                   \  "path" : a:path,
-                  \  "line" : a:linenumber,
+                  \  "position" : a:diff_position,
                   \  "body" : a:comment
                   \}), {
                   \   "Authorization": a:auth,
                   \   "Content-Type": "application/json",
                   \})
+
+  return response
 endfunction
 
 function! s:GitHubRepository()
@@ -67,13 +81,21 @@ function! s:GitHubRepository()
 endfunction
 
 function! s:CommitShaForCurrentLine()
-  let linenumber=line('.')
-  let path=expand('%:p')
+  let linenumber = line('.')
+  let path = expand('%:p')
 
   let cmd = 'git blame -L'.linenumber.','.linenumber.' --porcelain '.path
   let blame_text = system(cmd)
 
   return matchstr(blame_text, '\w\+')
+endfunction
+
+function! s:GetDiffLineNumber(commit_sha, path)
+  let line = getline('.')
+  let cmd = 'git show --oneline '.a:commit_sha.' '.a:path.' | grep -nFx '.shellescape('+'.line)
+  let diff_text = system(cmd)
+  let split_line = split(diff_text, ':')
+  return split_line[0] - 6
 endfunction
 
 function! s:GetAuthHeader()
@@ -85,7 +107,7 @@ function! s:GetAuthHeader()
     return token
   endif
 
-  let password = inputsecret("GitHub password for ".g:github_user.":")
+  let password = inputsecret("GitHub password for ".g:github_user.": ")
   if len(password) > 0
     let authorization = s:Authorize(password)
 
@@ -101,6 +123,7 @@ endfunction
 function! s:WriteToken(token)
   call writefile([a:token], s:tokenfile)
   call system("chmod go= ".s:tokenfile)
+  echomsg printf(" -> wrote token to %s", s:tokenfile)
 endfunction
 
 function! s:Authorize(password)
@@ -136,4 +159,22 @@ function! s:GetGitTopDir()
   endwhile
 
   return ""
+endfunction
+
+function! s:OpenBrowser(url)
+  if has('win32') || has('win64')
+    let cmd = '!start rundll32 url.dll,FileProtocolHandler '.shellescape(a:url)
+    silent! exec cmd
+  elseif has('mac') || has('macunix') || has('gui_macvim')
+    let cmd = 'open '.shellescape(a:url)
+    call system(cmd)
+  elseif executable('xdg-open')
+    let cmd = 'xdg-open '.shellescape(a:url)
+    call system(cmd)
+  elseif executable('firefox')
+    let cmd = 'firefox '.shellescape(a:url).' &'
+    call system(cmd)
+  else
+    echohl WarningMsg | echomsg "That's weird. It seems that you don't have a web browser." | echohl None
+  end
 endfunction
