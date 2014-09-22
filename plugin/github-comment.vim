@@ -21,6 +21,14 @@ if !executable('curl')
   finish
 endif
 
+" webapi uses autoload to define its functions, so they don't exist until they
+" are called.
+silent! call webapi#json#decode('{}')
+if !exists('*webapi#json#decode')
+  echohl ErrorMsg | echomsg "github-comment requires webapi (https://github.com/mattn/webapi-vim)" | echohl None
+  finish
+endif
+
 com! -nargs=+ GHComment call GHComment(<q-args>)
 
 function! GHComment(body)
@@ -58,6 +66,7 @@ function! s:CommentOnGitHub(auth, repo, commit_sha, path, diff_position, comment
   let request_uri = 'https://api.github.com/repos/'.a:repo.'/commits/'.a:commit_sha.'/comments'
 
   let response = webapi#http#post(request_uri, webapi#json#encode({
+                  \  "sha" : a:commit_sha,
                   \  "path" : a:path,
                   \  "position" : a:diff_position,
                   \  "body" : a:comment
@@ -84,7 +93,7 @@ function! s:CommitShaForCurrentLine()
   let linenumber = line('.')
   let path = expand('%:p')
 
-  let cmd = 'git blame -L'.linenumber.','.linenumber.' --porcelain '.path
+  let cmd = 'git blame HEAD -L'.linenumber.','.linenumber.' --porcelain '.path
   let blame_text = system(cmd)
 
   return matchstr(blame_text, '\w\+')
@@ -114,6 +123,9 @@ function! s:GetAuthHeader()
     if has_key(authorization, 'token')
       let token = printf("token %s", authorization.token)
       execute s:WriteToken(token)
+    elseif has_key(authorization, 'message')
+      redraw
+      echohl ErrorMsg | echomsg authorization.message | echohl None
     endif
   endif
 
@@ -128,12 +140,20 @@ endfunction
 
 function! s:Authorize(password)
   let auth = printf("basic %s", webapi#base64#b64encode(g:github_user.":".a:password))
-  let response = webapi#http#post('https://api.github.com/authorizations', webapi#json#encode({
-                  \  "scopes"        : ["repo"],
-                  \}), {
-                  \  "Content-Type"  : "application/json",
-                  \  "Authorization" : auth,
-                  \})
+
+  let auth_url = 'https://api.github.com/authorizations'
+  let data = webapi#json#encode({ "scopes" : ["repo"], "note" : "vim-github-comment Authorization" })
+  let header = { "Content-Type" : "application/json", "Authorization" : auth }
+
+  let response = webapi#http#post(auth_url, data, header)
+
+  let otp = filter(response.header, 'stridx(v:val, "X-GitHub-OTP:") == 0')
+  if len(otp)
+    let otp_token = inputsecret("GitHub authentication token: ")
+    let header["X-GitHub-OTP"] = otp_token
+    let response = webapi#http#post(auth_url, data, header)
+  endif
+
   return webapi#json#decode(response.content)
 endfunction
 
